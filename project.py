@@ -12,13 +12,14 @@ from astropy.io import fits
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
-from astropy.stats import SigmaClip, sigma_clipped_stats
+from astropy.stats import SigmaClip, sigma_clip, sigma_clipped_stats
 from astroquery.astrometry_net import AstrometryNet
 
 from astroquery.sdss import SDSS
 from photutils.detection import DAOStarFinder
 from photutils.aperture import aperture_photometry, ApertureStats, CircularAnnulus, CircularAperture, SkyCircularAperture
 
+import matplotlib.pyplot as plt
 
 target_sky = SkyCoord("22h02m43.26s +42d16m39.65s")
 
@@ -31,11 +32,16 @@ ast.api_key = "vxbrustekypatepi"
 
 directory = "./testdata1"
 subfolders = []
-subpipes = ["masters","images"]
+subpipes = ["masters","images","data","plots"]
+subout = ["data","plots"]
 
 scan = os.scandir(directory)
 for item in scan: 
-    if item.is_dir(): subfolders.append(item.name)
+    if item.is_dir() and item.name not in subout: subfolders.append(item.name)
+
+for so in subout:
+    path = os.path.join(directory,so)
+    os.makedirs(path, exist_ok = True)
 
 for folder in subfolders:
     # Begin by sorting data
@@ -192,18 +198,44 @@ for folder in subfolders:
                 bkgerr = bkg_stats.std * obj_stats.sum_aper_area.value
                 inst_mag_err = -2.5 * np.log10(bkgerr)
                 sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"])
+                reflist = sourcelist[sourcelist["ref_mag"]!=1000]
 
-                blist = [source["ref_mag"]-source["inst_mag"] for source in sourcelist]
-                bstats = sigma_clipped_stats(blist,sigma=1)
-                zero_point = bstats[1]
-                zero_point_err = bstats[2]
+                blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
+
+                iters = 0
+                zero_point = 0
+                zero_point_err = 1
+                while(zero_point_err > 0.1):
+                    iters += 1
+                    bstats = sigma_clipped_stats(blist,sigma=1,maxiters=iters)
+                    zero_point = bstats[1]
+                    zero_point_err = bstats[2]
                 
                 if failed: 
                     print("Zero-point computed as " + str(zero_point) + " with error " + str(zero_point_err))
                 else: 
                     t_inst_mag = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag"][0]
                     t_mag = t_inst_mag + zero_point
-                    print("Target magnitude computed as " + str(t_mag) + " with zero-point error " + str(zero_point_err))
+                    print(f"Target magnitude computed as {t_mag} with zero-point error {zero_point_err} after {iters} sigma-clip iterations")
+
+                    bclip = sigma_clip(blist,sigma=1,maxiters=iters)
+                    reflist.add_column(bclip.mask,name="outlier")
+                    inlist = reflist[reflist["outlier"]==False]
+                    outlist = reflist[reflist["outlier"]==True]
+
+                    fig_zp = plt.figure()
+                    plt.xlabel("Instrumental magnitude")
+                    plt.ylabel("Reference magnitude")
+                    plt.title(f"Night of {folder}, {run} in filter {filt}")
+                    plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err)) + f" with {iters} iterations")
+                    xlist_zp = np.linspace(np.min(reflist["inst_mag"]-0.1),np.max(reflist["inst_mag"]+0.1))
+                    ylist_zp = xlist_zp + zero_point
+                    plt.plot(xlist_zp,ylist_zp,c="royalblue",label="Fit line")
+                    plt.scatter(inlist["inst_mag"],inlist["ref_mag"],marker="o",c="dodgerblue",label="Reference stars")
+                    plt.scatter(outlist["inst_mag"],outlist["ref_mag"],marker="x",c="orangered",label="Rejected outliers")
+                    plt.scatter([t_inst_mag],[t_mag],marker="D",c="seagreen",label="Target")
+                    plt.legend()
+                    plt.savefig(pipeout+f"\\plots\\{filt}_{run}_zeropoint.png",bbox_inches="tight")
             except Exception as e:
                 print(f"Failure in {run} for filter {filt} in {base_path}. Reason: {e}")
             
