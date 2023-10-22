@@ -20,7 +20,7 @@ from astropy.stats import SigmaClip, sigma_clip, sigma_clipped_stats
 from astroquery.astrometry_net import AstrometryNet
 from astroquery.sdss import SDSS
 
-from photutils.detection import DAOStarFinder
+from photutils.detection import DAOStarFinder, IRAFStarFinder
 from photutils.aperture import aperture_photometry, ApertureStats, CircularAnnulus, CircularAperture, SkyCircularAperture
 
 import matplotlib.pyplot as plt
@@ -50,7 +50,7 @@ ast.api_key = "vxbrustekypatepi"
 directory = ".\\data"
 subfolders = []
 subpipes = ["masters","images","plots"]
-subout = ["outdata","plots"]
+subout = ["outdata"]
 
 scan = os.scandir(directory)
 for item in scan: 
@@ -60,7 +60,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","NREF","SNR"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","f4"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","NREF","SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","f4","?"))
 disappointments = []
 for folder in subfolders:
     # Begin by sorting data
@@ -153,8 +153,9 @@ for folder in subfolders:
                     final_image = np.sum(alg_stack, axis=0).astype("float32")
 
                     print("Finding sources...")
-                    daofind = DAOStarFinder(fwhm=FWHM, threshold=4.*np.std(final_image))
-                    sources = daofind(final_image - np.median(final_image))
+                    imgmean, imgmedian, imgstd = sigma_clipped_stats(final_image, sigma=3.0)
+                    daofind = DAOStarFinder(fwhm=FWHM, threshold=5.*imgstd)
+                    sources = daofind(final_image - imgmedian)
                     ogsources = len(sources)
                     for source in enumerate(sources):
                         if not (leftcrop < source[1]["xcentroid"] < WIDTH - rightcrop and botcrop < source[1]["ycentroid"] < HEIGHT - topcrop):
@@ -229,8 +230,6 @@ for folder in subfolders:
                     print(str(references)+" matches confirmed.")
                     if failed: 
                         print("Failed to find target in source list. Using WCS-derived position instead.")
-                        # xcentroid, ycentroid, ra, dec, ref_mag, ref_mag_err; inst_mag, inst_mag_err
-                        # target_pos[0], target_pos[1], 0, 0, 1000, 0;
                         sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000,0))
                     else: 
                         print("Target found in source list.")
@@ -249,23 +248,38 @@ for folder in subfolders:
                     snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_raw_stats.std+SRSIZE*dark_err+SRSIZE*READNOISE**2+SRSIZE*(GAIN*ANALOGDIGITALERROR)**2))
                     inst_mag_err = 2.5/(snr*np.log(10))
                     med_snr = np.median(snr)
+
                     sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"])
                     reflist = sourcelist[sourcelist["ref_mag"] != 1000]
+                    rawref = len(reflist)
+                    if rawref < 5:
+                        print("Very few (n<5) reference stars found. Data quality likely poor.")
+                        bad = True
                     blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
-
                     iters = 0
                     zero_point_std = 1
-                    while(zero_point_std > 0.1):
+                    bad = False
+                    while(zero_point_std > 0.1 and iters < 5):
                         iters += 1
                         bstats = sigma_clipped_stats(blist,sigma=1,maxiters=iters)
                         zero_point = bstats[1]
                         zero_point_std = bstats[2]
+                    if iters == 5:
+                        newzp = np.median(bstats)
+                        if abs(newzp - zero_point) > zero_point_std:
+                            print("Bad estimate without convergence. Data quality likely poor.")
+                            bad = True
+                        else:
+                            zero_point = newzp
+                            zero_point_std = np.std(bstats)
+
                     bclip = sigma_clip(blist,sigma=1,maxiters=iters)
                     reflist.add_column(bclip.mask,name="outlier")
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
                     zero_point_err = np.sqrt((zero_point_std**2)/nref+np.mean(inlist["ref_mag_err"])**2+np.mean(inlist["inst_mag_err"])**2) # standard error estimated as std divided by sqrt of sample size.
+                    print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                     t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0]
                     t_mag = t_inst_mag + zero_point
                     t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
@@ -283,10 +297,12 @@ for folder in subfolders:
                     plt.scatter([t_inst_mag],[t_mag],marker="D",c="seagreen",label="Target")
                     plt.legend()
                     plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
-                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,nref,med_snr))
                     plt.cla()
+
+                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,nref,med_snr,bad))
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
+                print(outtable)
             plt.close(fig_zp)
 
 print("Analysis completed! Writing files.")
