@@ -25,11 +25,15 @@ from photutils.aperture import aperture_photometry, ApertureStats, CircularAnnul
 
 import matplotlib.pyplot as plt
 
+start_time = time.time()
+
 warnings.simplefilter('ignore', category=np.exceptions.VisibleDeprecationWarning)
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
 target_sky = SkyCoord("22h02m43.26s +42d16m39.65s")
 
+CENTER_RA = 330.23
+CENTER_DEC = 42.28
 FWHM = 8.0
 WIDTH = 3216
 HEIGHT = 2208
@@ -37,13 +41,13 @@ SRSIZE = 30
 GAIN = 2.45
 ANALOGDIGITALERROR = np.sqrt(1/12)
 READNOISE = 2.5
-MAXATTEMPTS = 10
-WAITTIME = 5
+MAXATTEMPTS = 5
+WAITTIME = 10
 
 ast = AstrometryNet()
 ast.api_key = "vxbrustekypatepi"
 
-directory = "./data"
+directory = ".\\data"
 subfolders = []
 subpipes = ["masters","images","plots"]
 subout = ["outdata","plots"]
@@ -120,6 +124,7 @@ for folder in subfolders:
         master_flat = fits.getdata(pipeout+"\\masters\\master_flat_"+filt+".fit")
         for run in science[filt].keys():
             subruns = ceil(len(science[filt][run])/SRSIZE)
+            fig_zp = plt.figure()
             for subrun in range(subruns):
                 try:
                     print(f"Calibrating, aligning, and stacking frames in {run}.{subrun} for filter {filt} in {base_path}")
@@ -162,10 +167,7 @@ for folder in subfolders:
                     attempts = 0
                     while(attempts < MAXATTEMPTS):
                         try:
-                            wcs_header = ast.solve_from_source_list(sources["xcentroid"], sources["ycentroid"],WIDTH,HEIGHT,solve_timeout=60,center_ra=330.23,center_dec=42.28,radius=0.5)
-                        except TimeoutError:
-                            print("Timed out before solution found.")
-                            attempts = MAXATTEMPTS - 1 # only retry once if timed out
+                            wcs_header = ast.solve_from_source_list(sources["xcentroid"], sources["ycentroid"],WIDTH,HEIGHT,solve_timeout=90,center_ra=CENTER_RA,center_dec=CENTER_DEC,radius=0.5)
                         except Exception as e:
                             print(f"Failed. Reason: {e}")
                             attempts += 1
@@ -176,10 +178,12 @@ for folder in subfolders:
                                 time.sleep(WAITTIME)
                         else:
                             attempts = MAXATTEMPTS
-                        if wcs_header:
-                            print("Astrometric solution found!")
+                            if wcs_header:
+                                print("Astrometric solution found!")
+                            else:
+                                print("Ultimately failed to find astrometric solution, but did not throw error.")
 
-                    fits.PrimaryHDU(final_image,wcs_header).writeto(pipeout+"\\images\\final_"+filt+"_"+run+".fit",overwrite=True)
+                    fits.PrimaryHDU(final_image,wcs_header).writeto(pipeout+f"\\images\\final_{filt}_{run}-{subrun}.fit",overwrite=True)
                     
                     wcs = WCS(wcs_header)
                     target_pos = wcs.world_to_pixel(target_sky)
@@ -188,8 +192,6 @@ for folder in subfolders:
                     skycoords = np.transpose(wcs.pixel_to_world_values(sourcepositions))
                     sourcelist.add_columns([skycoords[0],skycoords[1],0.,0.],names=["ra","dec","ref_mag","ref_mag_err"])
 
-                    t_inst_mag = 0
-                    zero_point = 0
                     failed = True
                     sourceid = None
 
@@ -225,8 +227,13 @@ for folder in subfolders:
                     sourcelist = sourcelist[sourcelist["ref_mag"] != 0]
                     references = len(sourcelist) - 1 + int(failed)
                     print(str(references)+" matches confirmed.")
-                    if failed: print("Failed to find target in source list.")
-                    else: print("Target found in source list.")
+                    if failed: 
+                        print("Failed to find target in source list. Using WCS-derived position instead.")
+                        # xcentroid, ycentroid, ra, dec, ref_mag, ref_mag_err; inst_mag, inst_mag_err
+                        # target_pos[0], target_pos[1], 0, 0, 1000, 0;
+                        sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000,0))
+                    else: 
+                        print("Target found in source list.")
 
                     print("Performing aperture photometry...")
                     positions = [(source["xcentroid"],source["ycentroid"]) for source in sourcelist]
@@ -244,7 +251,6 @@ for folder in subfolders:
                     med_snr = np.median(snr)
                     sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"])
                     reflist = sourcelist[sourcelist["ref_mag"] != 1000]
-
                     blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
 
                     iters = 0
@@ -254,42 +260,43 @@ for folder in subfolders:
                         bstats = sigma_clipped_stats(blist,sigma=1,maxiters=iters)
                         zero_point = bstats[1]
                         zero_point_std = bstats[2]
-                        
                     bclip = sigma_clip(blist,sigma=1,maxiters=iters)
                     reflist.add_column(bclip.mask,name="outlier")
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
-                    zero_point_err = zero_point_std / np.sqrt(nref) # standard error estimated as std divided by sqrt of sample size.
-                    
-                    if failed: 
-                        print("Zero-point computed as " + str(zero_point) + " with error " + str(zero_point_err))
-                    else: 
-                        t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0]
-                        t_mag = t_inst_mag + zero_point
-                        t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
-                        print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
+                    zero_point_err = np.sqrt((zero_point_std**2)/nref+np.mean(inlist["ref_mag_err"])**2+np.mean(inlist["inst_mag_err"])**2) # standard error estimated as std divided by sqrt of sample size.
+                    t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0]
+                    t_mag = t_inst_mag + zero_point
+                    t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
+                    print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
 
-                        fig_zp = plt.figure()
-                        plt.xlabel("Instrumental magnitude")
-                        plt.ylabel("Reference magnitude")
-                        plt.title(f"Night of {folder}, {run}.{subrun} in filter {filt}")
-                        plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err)) + f" with {iters} iterations")
-                        xlist_zp = np.linspace(np.min(reflist["inst_mag"]-0.1),np.max(reflist["inst_mag"]+0.1))
-                        ylist_zp = xlist_zp + zero_point
-                        plt.plot(xlist_zp,ylist_zp,c="royalblue",label="Fit line")
-                        plt.scatter(inlist["inst_mag"],inlist["ref_mag"],marker="o",c="dodgerblue",label="Reference stars")
-                        plt.scatter(outlist["inst_mag"],outlist["ref_mag"],marker="x",c="orangered",label="Rejected outliers")
-                        plt.scatter([t_inst_mag],[t_mag],marker="D",c="seagreen",label="Target")
-                        plt.legend()
-                        plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
-                        outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,nref,med_snr))
+                    plt.xlabel("Instrumental magnitude")
+                    plt.ylabel("Reference magnitude")
+                    plt.title(f"Night of {folder}, {run}.{subrun} in filter {filt}")
+                    plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err)) + f" with {iters} iterations")
+                    xlist_zp = np.linspace(np.min(reflist["inst_mag"]-0.1),np.max(reflist["inst_mag"]+0.1))
+                    ylist_zp = xlist_zp + zero_point
+                    plt.plot(xlist_zp,ylist_zp,c="royalblue",label="Fit line")
+                    plt.scatter(inlist["inst_mag"],inlist["ref_mag"],marker="o",c="dodgerblue",label="Reference stars")
+                    plt.scatter(outlist["inst_mag"],outlist["ref_mag"],marker="x",c="orangered",label="Rejected outliers")
+                    plt.scatter([t_inst_mag],[t_mag],marker="D",c="seagreen",label="Target")
+                    plt.legend()
+                    plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
+                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,nref,med_snr))
+                    plt.cla()
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
+            plt.close(fig_zp)
 
 print("Analysis completed! Writing files.")
 outtable.write(directory+"\\outdata\\data.csv",format="csv",overwrite=True)
 with open(directory+"\\outdata\\failures.txt","w") as f: f.write("\n".join(disappointments))
-print("Complete.")
+print(f"Complete. Execution time: {time.time()-start_time}")
 
 # Last step is to plot the final data.
+
+# ISSUE: Looks like we can't handle poor focus. Ack. Will revising the source detection help? Probably should at least handle "target not found":
+    # When target not found in source list, just use the WCS-determined pixels for the center of the photometry to perform on the target.
+    # Is the program freezing in run g'-1.2 on the second night because of a memory issue, a time issue, or a data processing issue?
+    # Need to handle excess of plt figures. Explicitly close figures after calling savefig.
