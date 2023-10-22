@@ -1,6 +1,7 @@
 import os
 import glob
 import warnings
+import time
 
 from pathlib import PurePath
 from tqdm import tqdm
@@ -36,6 +37,8 @@ SRSIZE = 5 # change to 30 for actual data
 GAIN = 2.45
 ANALOGDIGITALERROR = np.sqrt(1/12)
 READNOISE = 2.5
+MAXATTEMPTS = 10
+WAITTIME = 5
 
 ast = AstrometryNet()
 ast.api_key = "vxbrustekypatepi"
@@ -103,8 +106,6 @@ for folder in subfolders:
     fits.PrimaryHDU(master_dark).writeto(pipeout+"\\masters\\master_dark.fit",overwrite=True)
     print(str(len(darks)) + " darks combined.")
 
-    print("Dark current error per pixel estimated to be " + str(dark_err))
-
     # Debias flats in each filter, and form master flat by median (dark current ignored because of extremely short exposure time)
     for filt in flats.keys():
         print("Forming master flat for filter " + filt + " in " + base_path)
@@ -158,14 +159,25 @@ for folder in subfolders:
                     sources.sort("flux")
                     sources.reverse()
 
-                    try:
-                        wcs_header = ast.solve_from_source_list(sources["xcentroid"], sources["ycentroid"],WIDTH,HEIGHT,solve_timeout=60,center_ra=330.23,center_dec=42.28,radius=0.5)
-                    except TimeoutError:
-                        print("Timed out before solution found.")
-                    if wcs_header:
-                        print("Astrometric solution found!")
-                    else:
-                        print("Failed to find astrometric solution.")
+                    attempts = 0
+                    while(attempts < MAXATTEMPTS):
+                        try:
+                            wcs_header = ast.solve_from_source_list(sources["xcentroid"], sources["ycentroid"],WIDTH,HEIGHT,solve_timeout=60,center_ra=330.23,center_dec=42.28,radius=0.5)
+                        except TimeoutError:
+                            print("Timed out before solution found.")
+                            attempts = MAXATTEMPTS - 1 # only retry once if timed out
+                        except Exception as e:
+                            print(f"Failed. Reason: {e}")
+                            attempts += 1
+                            if attempts >= MAXATTEMPTS:
+                                raise Exception("Out of tries. Moving on.")
+                            else:
+                                print(f"Retrying in {WAITTIME} seconds.")
+                                time.sleep(WAITTIME)
+                        else:
+                            attempts = MAXATTEMPTS
+                        if wcs_header:
+                            print("Astrometric solution found!")
 
                     fits.PrimaryHDU(final_image,wcs_header).writeto(pipeout+"\\images\\final_"+filt+"_"+run+".fit",overwrite=True)
                     
@@ -182,8 +194,21 @@ for folder in subfolders:
                     sourceid = None
 
                     print("Querying for SDSS catalog cross-matches...")
-                    result = SDSS.query_crossid(wcs.pixel_to_world(sources["xcentroid"],sources["ycentroid"]))
-                    print("Cross-match returned " + str(len(result)) + " matches.")
+                    attempts = 0
+                    while(attempts < MAXATTEMPTS):
+                        try:
+                            result = SDSS.query_crossid(wcs.pixel_to_world(sources["xcentroid"],sources["ycentroid"]))
+                        except Exception as e:
+                            print(f"Failed. Reason: {e}")
+                            attempts += 1
+                            if attempts >= MAXATTEMPTS:
+                                raise Exception("Out of tries. Moving on.")
+                            else:
+                                print(f"Retrying in {WAITTIME} seconds.")
+                                time.sleep(WAITTIME)
+                        else:
+                            attempts = MAXATTEMPTS
+                            print("Cross-match returned " + str(len(result)) + " matches.")    
 
                     for row in enumerate(sourcelist):
                         source = row[1]
@@ -215,11 +240,9 @@ for folder in subfolders:
                     bkgsub = obj_stats.sum - total_bkg
                     inst_mag = -2.5 * np.log10(bkgsub)
 
-                    print(f"object fluxes: {bkgsub}, background fluxes: {total_bkg}")
                     snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_perpixel+dark_err+READNOISE**2+(GAIN*ANALOGDIGITALERROR)**2))
                     inst_mag_err = 2.5/(snr*np.log(10))
                     med_snr = np.median(snr)
-                    print(f"Signal to noise ratio estimated as {med_snr}, instrumental mag error as {inst_mag_err}")
                     sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"])
                     reflist = sourcelist[sourcelist["ref_mag"] != 1000]
 
@@ -267,3 +290,5 @@ for folder in subfolders:
 
 outtable.write(directory+"\\data\\data.csv",format="csv",overwrite=True)
 with open(directory+"\\data\\failures.txt","w") as f: f.write("\n".join(disappointments))
+
+# Last step is to plot the final data.
