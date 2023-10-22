@@ -33,7 +33,7 @@ target_sky = SkyCoord("22h02m43.26s +42d16m39.65s")
 FWHM = 8.0
 WIDTH = 3216
 HEIGHT = 2208
-SRSIZE = 5 # change to 30 for actual data
+SRSIZE = 30
 GAIN = 2.45
 ANALOGDIGITALERROR = np.sqrt(1/12)
 READNOISE = 2.5
@@ -43,10 +43,10 @@ WAITTIME = 5
 ast = AstrometryNet()
 ast.api_key = "vxbrustekypatepi"
 
-directory = "./testdata1" # change to ./data for actual data
+directory = "./data"
 subfolders = []
 subpipes = ["masters","images","plots"]
-subout = ["data","plots"]
+subout = ["outdata","plots"]
 
 scan = os.scandir(directory)
 for item in scan: 
@@ -155,9 +155,9 @@ for folder in subfolders:
                         if not (leftcrop < source[1]["xcentroid"] < WIDTH - rightcrop and botcrop < source[1]["ycentroid"] < HEIGHT - topcrop):
                             sources.remove_row(source[0])
                     netsources = len(sources)
-                    print(str(netsources) + " sources found after eliminating " + str(ogsources-netsources) + " out-of-bounds. Querying astrometry.net for astrometric solution")
                     sources.sort("flux")
                     sources.reverse()
+                    print(str(netsources) + " sources found after eliminating " + str(ogsources-netsources) + " out-of-bounds. Querying astrometry.net for astrometric solution")
 
                     attempts = 0
                     while(attempts < MAXATTEMPTS):
@@ -232,15 +232,14 @@ for folder in subfolders:
                     positions = [(source["xcentroid"],source["ycentroid"]) for source in sourcelist]
                     aperture = CircularAperture(positions, r=FWHM*1.75)
                     annulus = CircularAnnulus(positions, r_in=FWHM*2., r_out=FWHM*3.)
-                    sclip = SigmaClip(sigma=3.0, maxiters=10)
+                    sclip = SigmaClip(sigma=3.0, maxiters=5)
                     obj_stats = ApertureStats(final_image, aperture, sigma_clip=None)
+                    bkg_raw_stats = ApertureStats(final_image, annulus, sigma_clip=None)
                     bkg_stats = ApertureStats(final_image, annulus, sigma_clip=sclip)
-                    bkg_perpixel = bkg_stats.median
                     total_bkg = bkg_stats.median * obj_stats.sum_aper_area.value
                     bkgsub = obj_stats.sum - total_bkg
                     inst_mag = -2.5 * np.log10(bkgsub)
-
-                    snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_perpixel+dark_err+READNOISE**2+(GAIN*ANALOGDIGITALERROR)**2))
+                    snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_raw_stats.std+SRSIZE*dark_err+SRSIZE*READNOISE**2+SRSIZE*(GAIN*ANALOGDIGITALERROR)**2))
                     inst_mag_err = 2.5/(snr*np.log(10))
                     med_snr = np.median(snr)
                     sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"])
@@ -288,7 +287,9 @@ for folder in subfolders:
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
 
-outtable.write(directory+"\\data\\data.csv",format="csv",overwrite=True)
-with open(directory+"\\data\\failures.txt","w") as f: f.write("\n".join(disappointments))
+print("Analysis completed! Writing files.")
+outtable.write(directory+"\\outdata\\data.csv",format="csv",overwrite=True)
+with open(directory+"\\outdata\\failures.txt","w") as f: f.write("\n".join(disappointments))
+print("Complete.")
 
 # Last step is to plot the final data.
