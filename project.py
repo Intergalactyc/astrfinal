@@ -53,11 +53,6 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-# estimate dark current s/n contribution as mean value of by-pixel std from master dark, times obj_stats.sum_aper_area.value
-# estimate sky s/n contribution as obj_stats.sum / total_bkg ???
-
-# flux error from sky and dark current. mag_uncertainty 
-
 outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","NREF","SNR"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","f4"))
 disappointments = []
 for folder in subfolders:
@@ -224,15 +219,8 @@ for folder in subfolders:
                     snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_perpixel+dark_err+READNOISE**2+(GAIN*ANALOGDIGITALERROR)**2))
                     inst_mag_err = 2.5/(snr*np.log(10))
                     med_snr = np.median(snr)
-                    #bkgerr = bkg_stats.std * obj_stats.sum_aper_area.value / np.sqrt(bkg_stats.sum_aper_area.value) ERRE
-                    #drcerr = dark_err * np.sqrt(obj_stats.sum_aper_area.value[0]) ERRE
-                    #flux_err = np.sqrt(bkgerr**2 + drcerr**2) ERRE
-                    #inst_mag_err = 2.5/np.log(10)*flux_err/bkgsub ERRE
-
-                    #print(f"Dark error estimated as {drcerr}, flux error as {np.mean(flux_err)}, instrumental mag error as {np.mean(inst_mag_err)}")
-                    #snr = 1/np.mean(inst_mag_err) ERRE
                     print(f"Signal to noise ratio estimated as {med_snr}, instrumental mag error as {inst_mag_err}")
-                    sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"]) #ERRE
+                    sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"])
                     reflist = sourcelist[sourcelist["ref_mag"] != 1000]
 
                     blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
@@ -250,12 +238,12 @@ for folder in subfolders:
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
-                    zero_point_err = zero_point_std / np.sqrt(nref) # standard error estimated as std divided by sqrt of sample size. GOODE
+                    zero_point_err = zero_point_std / np.sqrt(nref) # standard error estimated as std divided by sqrt of sample size.
                     
                     if failed: 
                         print("Zero-point computed as " + str(zero_point) + " with error " + str(zero_point_err))
                     else: 
-                        t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0] #ERRE
+                        t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0]
                         t_mag = t_inst_mag + zero_point
                         t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
                         print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
