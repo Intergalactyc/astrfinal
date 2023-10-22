@@ -41,8 +41,9 @@ SRSIZE = 30
 GAIN = 2.45
 ANALOGDIGITALERROR = np.sqrt(1/12)
 READNOISE = 2.5
-MAXATTEMPTS = 5
-WAITTIME = 10
+MAXATTEMPTS = 12
+MAXALIGNS = 5
+WAITTIME = 15
 
 ast = AstrometryNet()
 ast.api_key = "vxbrustekypatepi"
@@ -60,7 +61,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","NREF","SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","f4","?"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","?"))
 disappointments = []
 for folder in subfolders:
     # Begin by sorting data
@@ -136,16 +137,28 @@ for folder in subfolders:
                     cal_stack = [((fits.getdata(frame) - master_bias - master_dark)/master_flat, frame) for frame in science[filt][run][subrun*SRSIZE+1:(subrun+1)*SRSIZE]]
                     alg_stack = [target_ccd]
                     translations = [[],[]]
+                    failed_aligns = 0
                     for i in tqdm(range(len(cal_stack)),desc="Aligning..."):
-                        try:
-                            ccd = cal_stack[i][0]
-                            transform = aa.find_transform(ccd,target_cal)
-                            translations[0].append(transform[0].translation[0])
-                            translations[1].append(transform[0].translation[1])
-                            aligned = aa.apply_transform(transform[0],ccd,target_cal)[0]
-                            alg_stack.append(aligned)
-                        except Exception:
+                        align_attempts = 0
+                        align_target = target_cal
+                        while(align_attempts <= min([MAXALIGNS,i-failed_aligns])):
+                            if align_attempts > 0:
+                                align_target = alg_stack[align_attempts]
+                            try:
+                                ccd = cal_stack[i][0]
+                                transform = aa.find_transform(ccd,align_target)
+                            except Exception:
+                                align_attempts += 1
+                            else:
+                                align_attempts = 100
+                                translations[0].append(transform[0].translation[0])
+                                translations[1].append(transform[0].translation[1])
+                                aligned = aa.apply_transform(transform[0],ccd,align_target)[0]
+                                alg_stack.append(aligned)
+                        if align_attempts != 100:
+                            failed_aligns += 1 
                             disappointments.append(cal_stack[i][1])
+                    
                     rightcrop = ceil(0.5 * (max(translations[0])+abs(max(translations[0]))))+FWHM
                     leftcrop = ceil(0.5 * (min(translations[0])-abs(min(translations[0]))))+FWHM
                     topcrop = ceil(0.5 * (max(translations[1])+abs(max(translations[1]))))+FWHM
@@ -272,13 +285,15 @@ for folder in subfolders:
                         else:
                             zero_point = newzp
                             zero_point_std = np.std(bstats)
-
                     bclip = sigma_clip(blist,sigma=1,maxiters=iters)
                     reflist.add_column(bclip.mask,name="outlier")
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
                     zero_point_err = np.sqrt((zero_point_std**2+np.mean(inlist["ref_mag_err"])**2+np.mean(inlist["inst_mag_err"])**2)/nref) # standard error estimated as std divided by sqrt of sample size.
+                    if zero_point_err > 0.2:
+                        print("Unexpected zero point error. Data quality likely poor.")
+                        bad = True
                     print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                     t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0]
                     t_mag = t_inst_mag + zero_point
@@ -299,7 +314,7 @@ for folder in subfolders:
                     plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
                     plt.cla()
 
-                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,nref,med_snr,bad))
+                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,med_snr,bad))
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
             plt.close(fig_zp)
