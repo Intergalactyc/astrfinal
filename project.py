@@ -278,7 +278,7 @@ for folder in subfolders:
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
-                    zero_point_err = np.sqrt((zero_point_std**2)/nref+np.mean(inlist["ref_mag_err"])**2+np.mean(inlist["inst_mag_err"])**2) # standard error estimated as std divided by sqrt of sample size.
+                    zero_point_err = np.sqrt((zero_point_std**2+np.mean(inlist["ref_mag_err"])**2+np.mean(inlist["inst_mag_err"])**2)/nref) # standard error estimated as std divided by sqrt of sample size.
                     print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                     t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0]
                     t_mag = t_inst_mag + zero_point
@@ -302,7 +302,6 @@ for folder in subfolders:
                     outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,nref,med_snr,bad))
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
-                print(outtable)
             plt.close(fig_zp)
 
 print("Analysis completed! Writing files.")
