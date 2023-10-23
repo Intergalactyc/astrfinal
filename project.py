@@ -61,7 +61,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","?"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","MED_SNR","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","f4","?"))
 disappointments = []
 for folder in subfolders:
     # Begin by sorting data
@@ -261,9 +261,11 @@ for folder in subfolders:
                     snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_raw_stats.std+SRSIZE*dark_err+SRSIZE*READNOISE**2+SRSIZE*(GAIN*ANALOGDIGITALERROR)**2))
                     inst_mag_err = 2.5/(snr*np.log(10))
                     med_snr = np.median(snr)
+                    med_inst_mag_err = np.median(inst_mag_err)
 
-                    sourcelist.add_columns([inst_mag,inst_mag_err],names=["inst_mag","inst_mag_err"])
+                    sourcelist.add_columns([inst_mag,inst_mag_err,snr],names=["inst_mag","inst_mag_err","snr"])
                     reflist = sourcelist[sourcelist["ref_mag"] != 1000]
+                    reflist = reflist[reflist["inst_mag_err"] < max(med_inst_mag_err,0.05)]
                     rawref = len(reflist)
                     if rawref < 5:
                         print("Very few (n<5) reference stars found. Data quality likely poor.")
@@ -290,12 +292,12 @@ for folder in subfolders:
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
-                    zero_point_err = np.sqrt((zero_point_std**2+np.mean(inlist["ref_mag_err"])**2+np.mean(inlist["inst_mag_err"])**2)/nref) # standard error estimated as std divided by sqrt of sample size.
+                    zero_point_err = np.sqrt((zero_point_std**2)/nref+np.median(inlist["ref_mag_err"])**2+np.median(inlist["inst_mag_err"])**2) # standard error estimated as std divided by sqrt of sample size.
                     if zero_point_err > 0.2:
                         print("Unexpected zero point error. Data quality likely poor.")
                         bad = True
                     print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
-                    t_inst_mag, t_inst_mag_err = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err"][0]
+                    t_inst_mag, t_inst_mag_err, t_snr = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err","snr"][0]
                     t_mag = t_inst_mag + zero_point
                     t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
                     print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
@@ -304,8 +306,8 @@ for folder in subfolders:
                     plt.ylabel("Reference magnitude")
                     plt.title(f"Night of {folder}, {run}.{subrun} in filter {filt}")
                     plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err)) + f" with {iters} iterations")
-                    xlist_zp = np.linspace(np.min(reflist["inst_mag"]-0.1),np.max(reflist["inst_mag"]+0.1))
-                    ylist_zp = xlist_zp + zero_point
+                    xlist_zp = [np.min(inlist["inst_mag"])-0.1,np.max(inlist["inst_mag"])+0.1]
+                    ylist_zp = [np.min(inlist["inst_mag"])-0.1+zero_point,np.max(inlist["inst_mag"])+0.1+zero_point]
                     plt.plot(xlist_zp,ylist_zp,c="royalblue",label="Fit line")
                     plt.scatter(inlist["inst_mag"],inlist["ref_mag"],marker="o",c="dodgerblue",label="Reference stars")
                     plt.scatter(outlist["inst_mag"],outlist["ref_mag"],marker="x",c="orangered",label="Rejected outliers")
@@ -314,7 +316,7 @@ for folder in subfolders:
                     plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
                     plt.cla()
 
-                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,med_snr,bad))
+                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,med_snr,t_snr,bad))
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
             plt.close(fig_zp)
@@ -322,7 +324,7 @@ for folder in subfolders:
 print("Analysis completed! Writing files.")
 outtable.write(directory+"\\outdata\\data.csv",format="csv",overwrite=True)
 with open(directory+"\\outdata\\failures.txt","w") as f: f.write("\n".join(disappointments))
-print(f"Complete. Execution time: {time.time()-start_time}")
+print(f"Complete. Execution time: {time.time()-start_time} seconds.")
 
 # Last step is to plot the final data.
 
