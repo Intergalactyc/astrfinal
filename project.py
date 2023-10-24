@@ -30,17 +30,16 @@ start_time = time.time()
 warnings.simplefilter('ignore', category=np.exceptions.VisibleDeprecationWarning)
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
-target_sky = SkyCoord("22h02m43.26s +42d16m39.65s")
+target_sky = SkyCoord("22h02m43.26s +42d16m39.65s") # BL Lac coordinates
 
-CENTER_RA = 330.23
-CENTER_DEC = 42.28
+CENTER_RA, CENTER_DEC = 330.23, 42.28 # RA and Dec for center of search, in degrees
 FWHM = 8.0
 WIDTH = 3216
 HEIGHT = 2208
 SRSIZE = 30
-GAIN = 2.45
-ANALOGDIGITALERROR = np.sqrt(1/12)
-READNOISE = 2.5
+GAIN = 2.45 # Gain of specific camera used on medium-gain readout mode
+ANALOGDIGITALERROR = np.sqrt(1/12) # Error in analog-digital conversion
+READNOISE = 2.5 # From the specific camera used on medium-gain readout mode
 MAXATTEMPTS = 12
 MAXALIGNS = 5
 WAITTIME = 15
@@ -61,7 +60,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","MED_SNR","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","f4","?"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","MED_SNR","AVG_SNR","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","f4","f4","?"))
 disappointments = []
 for folder in subfolders:
     # Begin by sorting data
@@ -121,11 +120,13 @@ for folder in subfolders:
         fits.PrimaryHDU(master_flat).writeto(pipeout+"\\masters\\master_flat_"+filt+".fit",overwrite=True)
         print(str(len(flats[filt])) + " " + filt + " flats combined")
 
+    # Now for the real processing
     for filt in science.keys():
         master_flat = fits.getdata(pipeout+"\\masters\\master_flat_"+filt+".fit")
         for run in science[filt].keys():
             subruns = ceil(len(science[filt][run])/SRSIZE)
             fig_zp = plt.figure()
+            # Iterate over subruns of size defined by SRSIZE
             for subrun in range(subruns):
                 try:
                     print(f"Calibrating, aligning, and stacking frames in {run}.{subrun} for filter {filt} in {base_path}")
@@ -138,6 +139,7 @@ for folder in subfolders:
                     alg_stack = [target_ccd]
                     translations = [[],[]]
                     failed_aligns = 0
+                    # Run alignment. If a frame fails to align to the target frame, attempt to align it to the frame following the target frame, and so on up to MAXALIGNS times, after which it will be labeled a "disappointment" and discarded
                     for i in tqdm(range(len(cal_stack)),desc="Aligning..."):
                         align_attempts = 0
                         align_target = target_cal
@@ -159,18 +161,21 @@ for folder in subfolders:
                             failed_aligns += 1 
                             disappointments.append(cal_stack[i][1])
                     
+                    # Find border regions not common to all frames
                     rightcrop = ceil(0.5 * (max(translations[0])+abs(max(translations[0]))))+FWHM
                     leftcrop = ceil(0.5 * (min(translations[0])-abs(min(translations[0]))))+FWHM
                     topcrop = ceil(0.5 * (max(translations[1])+abs(max(translations[1]))))+FWHM
                     botcrop = ceil(0.5 * (min(translations[1])-abs(min(translations[1]))))+FWHM
                     final_image = np.sum(alg_stack, axis=0).astype("float32")
 
+                    # Run a DAOStarFinder source finding algorithm with sigma-clipped median sky subtraction
                     print("Finding sources...")
                     imgmean, imgmedian, imgstd = sigma_clipped_stats(final_image, sigma=3.0)
                     daofind = DAOStarFinder(fwhm=FWHM, threshold=5.*imgstd)
                     sources = daofind(final_image - imgmedian)
                     ogsources = len(sources)
                     for source in enumerate(sources):
+                        # If the source is outside of the determined borders, discard it
                         if not (leftcrop < source[1]["xcentroid"] < WIDTH - rightcrop and botcrop < source[1]["ycentroid"] < HEIGHT - topcrop):
                             sources.remove_row(source[0])
                     netsources = len(sources)
@@ -178,6 +183,7 @@ for folder in subfolders:
                     sources.reverse()
                     print(str(netsources) + " sources found after eliminating " + str(ogsources-netsources) + " out-of-bounds. Querying astrometry.net for astrometric solution")
 
+                    # Query Astrometry.net for an astrometric solution. Try-catch set up, mostly for the sake of retrying on a connection failure
                     attempts = 0
                     while(attempts < MAXATTEMPTS):
                         try:
@@ -197,6 +203,7 @@ for folder in subfolders:
                             else:
                                 print("Ultimately failed to find astrometric solution, but did not throw error.")
 
+                    # Write out astrometrically solved stacked image
                     fits.PrimaryHDU(final_image,wcs_header).writeto(pipeout+f"\\images\\final_{filt}_{run}-{subrun}.fit",overwrite=True)
                     
                     wcs = WCS(wcs_header)
@@ -209,6 +216,7 @@ for folder in subfolders:
                     failed = True
                     sourceid = None
 
+                    # Use Astroquery to check the SDSS catalog for source matches in order to estimate zero-point for photometric calibration. Again a try-catch is set up to retry in case of connection failure
                     print("Querying for SDSS catalog cross-matches...")
                     attempts = 0
                     while(attempts < MAXATTEMPTS):
@@ -226,10 +234,11 @@ for folder in subfolders:
                             attempts = MAXATTEMPTS
                             print("Cross-match returned " + str(len(result)) + " matches.")    
 
+                    # Confirm matches and pair lists
                     for row in enumerate(sourcelist):
                         source = row[1]
                         if abs(source["xcentroid"]-target_pos[0])+abs(source["ycentroid"]-target_pos[1]) < 3:
-                            source["ref_mag"] = 1000
+                            source["ref_mag"] = 1000 # Mark target with a reference magnitude "tag" of 1000
                             failed = False
                         else:
                             for cross in result:
@@ -237,71 +246,73 @@ for folder in subfolders:
                                 if err < 0.001:
                                     source["ref_mag"] = cross["psfMag_"+filt[0]]
                                     source["ref_mag_err"] = cross["psfMagerr_"+filt[0]]
-                    
-                    sourcelist = sourcelist[sourcelist["ref_mag"] != 0]
+                    sourcelist = sourcelist[sourcelist["ref_mag"] != 0] # Remove sources without a catalog cross-match
                     references = len(sourcelist) - 1 + int(failed)
                     print(str(references)+" matches confirmed.")
                     if failed: 
                         print("Failed to find target in source list. Using WCS-derived position instead.")
-                        sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000,0))
+                        sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000,0)) # Worst case scenario
                     else: 
                         print("Target found in source list.")
 
+                    # Aperture photometry: circular apertures; median sigma-clipped background from annulus
                     print("Performing aperture photometry...")
                     positions = [(source["xcentroid"],source["ycentroid"]) for source in sourcelist]
                     aperture = CircularAperture(positions, r=FWHM*1.75)
                     annulus = CircularAnnulus(positions, r_in=FWHM*2., r_out=FWHM*3.)
                     sclip = SigmaClip(sigma=3.0, maxiters=5)
                     obj_stats = ApertureStats(final_image, aperture, sigma_clip=None)
-                    bkg_raw_stats = ApertureStats(final_image, annulus, sigma_clip=None)
-                    bkg_stats = ApertureStats(final_image, annulus, sigma_clip=sclip)
+                    bkg_raw_stats = ApertureStats(final_image, annulus, sigma_clip=None) # Find aperture stats of background for S/N estimation: need the std before sigma-clipping
+                    bkg_stats = ApertureStats(final_image, annulus, sigma_clip=sclip) # The background stats used in the actual sky subtraction
                     total_bkg = bkg_stats.median * obj_stats.sum_aper_area.value
                     bkgsub = obj_stats.sum - total_bkg
                     inst_mag = -2.5 * np.log10(bkgsub)
+                    # Estimate S/N ratio using the standard CCD equation.
                     snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_raw_stats.std+SRSIZE*dark_err+SRSIZE*READNOISE**2+SRSIZE*(GAIN*ANALOGDIGITALERROR)**2))
-                    inst_mag_err = 2.5/(snr*np.log(10))
-                    med_snr = np.median(snr)
+                    inst_mag_err = 2.5/(snr*np.log(10)) # Error in instrumental magnitude from S/N
+                    med_snr = np.median(snr) # This and avg_snr are appended to the output data table
+                    avg_snr = np.mean(snr)
                     med_inst_mag_err = np.median(inst_mag_err)
 
                     sourcelist.add_columns([inst_mag,inst_mag_err,snr],names=["inst_mag","inst_mag_err","snr"])
-                    reflist = sourcelist[sourcelist["ref_mag"] != 1000]
-                    reflist = reflist[reflist["inst_mag_err"] < max(med_inst_mag_err,0.05)]
-                    rawref = len(reflist)
-                    if rawref < 5:
+                    reflist = sourcelist[sourcelist["ref_mag"] != 1000] # Don't use target as a reference
+                    if len(reflist) > 10: reflist = reflist[reflist["inst_mag_err"] < max(med_inst_mag_err,0.05)] # Eliminate sources with high error from being references, only if there are more than 10 references in the first place
+                    if len(reflist) < 5:
                         print("Very few (n<5) reference stars found. Data quality likely poor.")
                         bad = True
-                    blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
+                    blist = [source["ref_mag"]-source["inst_mag"] for source in reflist] # List of zero-points estimated for each reference star
                     iters = 0
                     zero_point_std = 1
                     bad = False
-                    while(zero_point_std > 0.1 and iters < 5):
+                    while(zero_point_std > 0.1 and iters <= 5): # Sigma-clipping to determine zero-point without outliers
                         iters += 1
-                        bstats = sigma_clipped_stats(blist,sigma=1,maxiters=iters)
+                        bstats = sigma_clipped_stats(blist,sigma=1,maxiters=iters,cenfunc="mean")
                         zero_point = bstats[1]
                         zero_point_std = bstats[2]
-                    if iters == 5:
-                        newzp = np.median(bstats)
+                    if iters > 5: # If it takes more than 5 iterations, there wasn't convergence
+                        medzp = np.median(bstats)
                         if abs(newzp - zero_point) > zero_point_std:
                             print("Bad estimate without convergence. Data quality likely poor.")
                             bad = True
                         else:
-                            zero_point = newzp
-                            zero_point_std = np.std(bstats)
-                    bclip = sigma_clip(blist,sigma=1,maxiters=iters)
+                            zero_point = medzp
+                            zero_point_std = 1.5*np.std(bstats) # If the median seems like an okay estimate, use it; multiply std by 1.5 to account for SE on median vs mean
+                    bclip = sigma_clip(blist,sigma=1,maxiters=iters,cenfunc="mean") # Repeat the same sigma-clipping but now in order to determine WHICH points are outliers
                     reflist.add_column(bclip.mask,name="outlier")
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
-                    zero_point_err = np.sqrt((zero_point_std**2)/nref+np.median(inlist["ref_mag_err"])**2+np.median(inlist["inst_mag_err"])**2) # standard error estimated as std divided by sqrt of sample size.
+                    zero_point_err = zero_point_std / np.sqrt(nref) # Standard error on the mean estimated as sample standard deviation divided by square root of sample size
                     if zero_point_err > 0.2:
                         print("Unexpected zero point error. Data quality likely poor.")
                         bad = True
                     print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                     t_inst_mag, t_inst_mag_err, t_snr = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err","snr"][0]
                     t_mag = t_inst_mag + zero_point
-                    t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
+                    t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2) # Zero point error and instrumental magnitude error combine to make the net error on the target magnitude
                     print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
 
+                    # Plot data regarding zero-point calculation
                     plt.xlabel("Instrumental magnitude")
                     plt.ylabel("Reference magnitude")
                     plt.title(f"Night of {folder}, {run}.{subrun} in filter {filt}")
@@ -316,7 +327,8 @@ for folder in subfolders:
                     plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
                     plt.cla()
 
-                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,med_snr,t_snr,bad))
+                    # Append data to output table
+                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,med_snr,avg_snr,t_snr,bad))
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
             plt.close(fig_zp)
@@ -325,10 +337,3 @@ print("Analysis completed! Writing files.")
 outtable.write(directory+"\\outdata\\data.csv",format="csv",overwrite=True)
 with open(directory+"\\outdata\\failures.txt","w") as f: f.write("\n".join(disappointments))
 print(f"Complete. Execution time: {time.time()-start_time} seconds.")
-
-# Last step is to plot the final data.
-
-# ISSUE: Looks like we can't handle poor focus. Ack. Will revising the source detection help? Probably should at least handle "target not found":
-    # When target not found in source list, just use the WCS-determined pixels for the center of the photometry to perform on the target.
-    # Is the program freezing in run g'-1.2 on the second night because of a memory issue, a time issue, or a data processing issue?
-    # Need to handle excess of plt figures. Explicitly close figures after calling savefig.
