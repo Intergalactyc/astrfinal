@@ -36,13 +36,13 @@ CENTER_RA, CENTER_DEC = 330.23, 42.28 # RA and Dec for center of search, in degr
 FWHM = 8.0
 WIDTH = 3216
 HEIGHT = 2208
-SRSIZE = 30
+SRSIZE = 120
 GAIN = 2.45 # Gain of specific camera used on medium-gain readout mode
 ANALOGDIGITALERROR = np.sqrt(1/12) # Error in analog-digital conversion
 READNOISE = 2.5 # From the specific camera used on medium-gain readout mode
-MAXATTEMPTS = 12
+MAXATTEMPTS = 30
 MAXALIGNS = 5
-WAITTIME = 15
+WAITTIME = 5
 
 ast = AstrometryNet()
 ast.api_key = "vxbrustekypatepi"
@@ -60,7 +60,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","MED_SNR","AVG_SNR","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","f4","f4","?"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","?"))
 disappointments = []
 for folder in subfolders:
     # Begin by sorting data
@@ -105,8 +105,7 @@ for folder in subfolders:
     print("Forming master dark for " + base_path)
     dark_stack = [fits.getdata(dark) - master_bias for dark in darks]
     master_dark = np.median(dark_stack, axis=0).astype("float32")
-    std_dark = np.std(dark_stack-master_bias, axis=0)
-    dark_err = np.mean(std_dark)
+    med_dark = np.median(master_dark)
     fits.PrimaryHDU(master_dark).writeto(pipeout+"\\masters\\master_dark.fit",overwrite=True)
     print(str(len(darks)) + " darks combined.")
 
@@ -135,7 +134,8 @@ for folder in subfolders:
                     JD_OBS = target_fits[0].header["JD"]
                     DATE_OBS = folder
                     target_cal = (target_ccd - master_bias - master_dark)/master_flat
-                    cal_stack = [((fits.getdata(frame) - master_bias - master_dark)/master_flat, frame) for frame in science[filt][run][subrun*SRSIZE+1:(subrun+1)*SRSIZE]]
+                    considered_frames = science[filt][run][subrun*SRSIZE+1:(subrun+1)*SRSIZE]
+                    cal_stack = [((fits.getdata(frame) - master_bias - master_dark)/master_flat, frame) for frame in considered_frames]
                     alg_stack = [target_ccd]
                     translations = [[],[]]
                     failed_aligns = 0
@@ -166,7 +166,10 @@ for folder in subfolders:
                     leftcrop = ceil(0.5 * (min(translations[0])-abs(min(translations[0]))))+FWHM
                     topcrop = ceil(0.5 * (max(translations[1])+abs(max(translations[1]))))+FWHM
                     botcrop = ceil(0.5 * (min(translations[1])-abs(min(translations[1]))))+FWHM
+
+                    # Stack aligned frames
                     final_image = np.sum(alg_stack, axis=0).astype("float32")
+                    FRAMES = len(alg_stack)
 
                     # Run a DAOStarFinder source finding algorithm with sigma-clipped median sky subtraction
                     print("Finding sources...")
@@ -262,16 +265,13 @@ for folder in subfolders:
                     annulus = CircularAnnulus(positions, r_in=FWHM*2., r_out=FWHM*3.)
                     sclip = SigmaClip(sigma=3.0, maxiters=5)
                     obj_stats = ApertureStats(final_image, aperture, sigma_clip=None)
-                    bkg_raw_stats = ApertureStats(final_image, annulus, sigma_clip=None) # Find aperture stats of background for S/N estimation: need the std before sigma-clipping
-                    bkg_stats = ApertureStats(final_image, annulus, sigma_clip=sclip) # The background stats used in the actual sky subtraction
+                    bkg_stats = ApertureStats(final_image, aperture, sigma_clip=sclip)
                     total_bkg = bkg_stats.median * obj_stats.sum_aper_area.value
                     bkgsub = obj_stats.sum - total_bkg
                     inst_mag = -2.5 * np.log10(bkgsub)
-                    # Estimate S/N ratio using the standard CCD equation.
-                    snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_raw_stats.std+SRSIZE*dark_err+SRSIZE*READNOISE**2+SRSIZE*(GAIN*ANALOGDIGITALERROR)**2))
+                    # Estimate S/N ratio using the modified CCD equation.
+                    snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_stats.median+FRAMES*med_dark+FRAMES*READNOISE**2+FRAMES*(GAIN*ANALOGDIGITALERROR)**2))
                     inst_mag_err = 2.5/(snr*np.log(10)) # Error in instrumental magnitude from S/N
-                    med_snr = np.median(snr) # This and avg_snr are appended to the output data table
-                    avg_snr = np.mean(snr)
                     med_inst_mag_err = np.median(inst_mag_err)
 
                     sourcelist.add_columns([inst_mag,inst_mag_err,snr],names=["inst_mag","inst_mag_err","snr"])
@@ -310,6 +310,7 @@ for folder in subfolders:
                     t_inst_mag, t_inst_mag_err, t_snr = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err","snr"][0]
                     t_mag = t_inst_mag + zero_point
                     t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2) # Zero point error and instrumental magnitude error combine to make the net error on the target magnitude
+                    print(f"Target S/N ratio: {t_snr}")
                     print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
 
                     # Plot data regarding zero-point calculation
@@ -328,7 +329,7 @@ for folder in subfolders:
                     plt.cla()
 
                     # Append data to output table
-                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,med_snr,avg_snr,t_snr,bad))
+                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,t_snr,bad))
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
             plt.close(fig_zp)
