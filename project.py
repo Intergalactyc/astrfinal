@@ -31,10 +31,13 @@ warnings.simplefilter('ignore', category=np.exceptions.VisibleDeprecationWarning
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
 target_sky = SkyCoord("22h02m43.26s +42d16m39.65s") # BL Lac coordinates
+reference_sky = SkyCoord("22h02m45.42s +42d16m35.48s") # UCAC4 662-103491 coordinates
+reference_mags = {"g'":13.777,"r'":12.326,"i'":11.683}
+reference_errs = {"g'":0.02,"r'":0.06,"i'":0.07}
 
 CENTER_RA, CENTER_DEC = 330.23, 42.28 # RA and Dec for center of search, in degrees
 FWHM = 8.0
-R_AP = 1.7
+R_AP = 1.75
 R_IN = 2.0
 R_OUT = 3.0
 WIDTH = 3216
@@ -63,7 +66,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","MAG","MAG_ERR","FAIL","NREF","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","?"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","T_MAG","T_MAG_ERR","R_MAG","R_MAG_ERR","FAIL","NREF","TGT_SNR","R_SNR","BAD","OUT"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","f8","f8","i4","i4","f4","f4","?","?"))
 disappointments = []
 for folder in subfolders:
     # Begin by sorting data
@@ -177,7 +180,7 @@ for folder in subfolders:
                     # Run a DAOStarFinder source finding algorithm with sigma-clipped median sky subtraction
                     print("Finding sources...")
                     imgmean, imgmedian, imgstd = sigma_clipped_stats(final_image, sigma=3.0)
-                    daofind = DAOStarFinder(fwhm=FWHM, threshold=6.*imgstd)
+                    daofind = DAOStarFinder(fwhm=FWHM, threshold=5.*imgstd)
                     sources = daofind(final_image - imgmedian)
                     ogsources = len(sources)
                     for source in enumerate(sources):
@@ -214,12 +217,14 @@ for folder in subfolders:
                     
                     wcs = WCS(wcs_header)
                     target_pos = wcs.world_to_pixel(target_sky)
+                    reference_pos = wcs.world_to_pixel(reference_sky)
                     sourcepositions = [(source["xcentroid"],source["ycentroid"]) for source in sources]
                     sourcelist = sources["xcentroid","ycentroid"]
                     skycoords = np.transpose(wcs.pixel_to_world_values(sourcepositions))
-                    sourcelist.add_columns([skycoords[0],skycoords[1],0.,0.],names=["ra","dec","ref_mag","ref_mag_err"])
+                    sourcelist.add_columns([skycoords[0],skycoords[1],0.],names=["ra","dec","ref_mag"])
 
-                    failed = True
+                    failedT = True
+                    failedR = True
                     sourceid = None
 
                     # Use Astroquery to check the SDSS catalog for source matches in order to estimate zero-point for photometric calibration. Again a try-catch is set up to retry in case of connection failure
@@ -241,39 +246,46 @@ for folder in subfolders:
                             print("Cross-match returned " + str(len(result)) + " matches.")    
 
                     # Confirm matches and pair lists
+                    print(f"Reference position: ({reference_pos[0]},{reference_pos[1]})")
                     for source in sourcelist:
-                        if abs(source["xcentroid"]-target_pos[0])+abs(source["ycentroid"]-target_pos[1]) < 3:
+                        if abs(source["xcentroid"]-target_pos[0])+abs(source["ycentroid"]-target_pos[1]) < 5:
                             # Mark target with a reference magnitude "tag" of 1000
                             source["ref_mag"] = 1000
-                            failed = False
+                            failedT = False
+                        elif abs(source["xcentroid"]-reference_pos[0])+abs(source["xcentroid"]-reference_pos[1]) < 5:
+                            # Mark primary reference with a reference magnitude "tag" of 2000
+                            source["ref_mag"] = 2000
+                            failedR = False
                         else:
                             for cross in result:
                                 err = abs(cross["ra"]-source["ra"])+abs(cross["dec"]-source["dec"])
                                 if err < 0.001:
                                     source["ref_mag"] = cross["psfMag_"+filt[0]]
-                                    source["ref_mag_err"] = cross["psfMagerr_"+filt[0]]
                     # Remove sources too close to eachother / sources without a catalog cross-match
                     sourcelist = sourcelist[sourcelist["ref_mag"] != 0] 
                     keepers = list(range(len(sourcelist)))
                     for first in enumerate(sourcelist):
                         for second in enumerate(sourcelist):
                             if (first != second) and (np.sqrt((first[1]["xcentroid"]-second[1]["xcentroid"])**2+(first[1]["ycentroid"]-second[1]["ycentroid"])**2) < FWHM * (R_OUT + R_IN)):
-                                if first[1]["ref_mag"] == 1000 or second[1]["ref_mag"] == 1000:
-                                    raise Exception("Target eliminated due to conflicting source...")
-                                if first[0] in keepers:
-                                    keepers.remove(first[0])
-                                if second[0] in keepers:
-                                    keepers.remove(second[0])
+                                if not(first[1]["ref_mag"] in [1000,2000] or second[1]["ref_mag"] in [1000,2000]):
+                                    if first[0] in keepers:
+                                        keepers.remove(first[0])
+                                    if second[0] in keepers:
+                                        keepers.remove(second[0])
                     sourcelist = sourcelist[keepers]
-                    references = len(sourcelist) - 1 + int(failed)
+                    references = len(sourcelist) - 2 + int(failedT) + int(failedR)
                     print(str(references)+" matches confirmed.")
-                    if failed: 
+                    if failedT: 
                         print("Failed to find target in source list. Using WCS-derived position instead.")
-                        # Worst case scenario
-                        sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000,0))
+                        sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000))
                     else: 
                         print("Target found in source list.")
-
+                    if failedR:
+                        print("Failed to find primary reference in source list. Using WCS-derived position instead.")
+                        sourcelist.add_row((reference_pos[0],reference_pos[1],0,0,2000))
+                    else:
+                        print("Primary reference found in source list.")
+                    
                     # Aperture photometry: circular apertures; sigma-clipped median background from annulus
                     print("Performing aperture photometry...")
                     positions = [(source["xcentroid"],source["ycentroid"]) for source in sourcelist]
@@ -297,10 +309,11 @@ for folder in subfolders:
                     # Remove bad objects previously tagged
                     sourcelist = sourcelist[sourcelist["inst_mag"] != -40]
                     med_inst_mag_err = np.median(sourcelist["inst_mag_err"])
-                    # Don't use target as a reference
+                    # Don't use target or primary reference as a reference
                     reflist = sourcelist[sourcelist["ref_mag"] != 1000]
-                    # Eliminate sources with high error from being references (as long as there are more than 10 references to begin with)
-                    if len(reflist) > 10: reflist = reflist[reflist["inst_mag_err"] < max(med_inst_mag_err,0.05)]
+                    reflist = reflist[reflist["ref_mag"] != 2000]
+                    # Eliminate sources with high error from being references (as long as there are more than 15 references to begin with)
+                    if len(reflist) > 15: reflist = reflist[reflist["inst_mag_err"] < max(med_inst_mag_err,0.05)]
                     if len(reflist) < 5:
                         print("Very few (n<5) reference stars found. Data quality likely poor.")
                         bad = True
@@ -337,11 +350,19 @@ for folder in subfolders:
                         bad = True
                     print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                     t_inst_mag, t_inst_mag_err, t_snr = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err","snr"][0]
+                    r_inst_mag, r_inst_mag_err, r_snr = sourcelist[sourcelist["ref_mag"]==2000]["inst_mag","inst_mag_err","snr"][0]
                     t_mag = t_inst_mag + zero_point
+                    r_mag = r_inst_mag + zero_point
+                    r_diff = abs(r_mag - reference_mags[filt])
+
                     # Zero point error and instrumental magnitude error combine to make the net error on the target magnitude
                     t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
-                    print(f"Target S/N ratio: {t_snr}")
+                    r_mag_err = np.sqrt(zero_point_err**2 + r_inst_mag_err**2)
+                    r_out = r_diff > r_mag_err + reference_errs[filt]
+                    print(f"Target, Reference S/N ratios: {t_snr}, {r_snr}")
                     print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
+                    print(f"Reference magnitude computed as {r_mag} with error {r_mag_err}, referenced to {reference_mags[filt]}.")
+                    if r_out: print("Reference magnitude out of expected bounds.")
                     if np.isnan(t_mag) or t_snr < 0:
                         print("Nonphysical values obtained. Data quality likely poor.")
                         bad = True
@@ -356,13 +377,14 @@ for folder in subfolders:
                     plt.plot(xlist_zp,ylist_zp,c="royalblue",label="Fit line")
                     plt.scatter(inlist["inst_mag"],inlist["ref_mag"],marker="o",c="dodgerblue",label="Reference stars")
                     plt.scatter(outlist["inst_mag"],outlist["ref_mag"],marker="x",c="orangered",label="Rejected outliers")
-                    plt.scatter([t_inst_mag],[t_mag],marker="D",c="seagreen",label="Target")
+                    plt.scatter([t_inst_mag],[t_mag],marker="D",c="mediumorchid",label="Target")
+                    plt.scatter([r_inst_mag],[r_mag],marker="D",c="seagreen",label="Primary Reference")
                     plt.legend()
                     plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
                     plt.cla()
 
                     # Append data to output table
-                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,t_snr,bad))
+                    outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,r_mag,r_mag_err,failed_aligns,nref,t_snr,r_snr,bad,r_out))
                 except Exception as e:
                     print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
             plt.close(fig_zp)
