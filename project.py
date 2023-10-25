@@ -34,15 +34,18 @@ target_sky = SkyCoord("22h02m43.26s +42d16m39.65s") # BL Lac coordinates
 
 CENTER_RA, CENTER_DEC = 330.23, 42.28 # RA and Dec for center of search, in degrees
 FWHM = 8.0
+R_AP = 1.7
+R_IN = 2.0
+R_OUT = 3.0
 WIDTH = 3216
 HEIGHT = 2208
-SRSIZE = 120
+SRSIZE = 60
 GAIN = 2.45 # Gain of specific camera used on medium-gain readout mode
 ANALOGDIGITALERROR = np.sqrt(1/12) # Error in analog-digital conversion
 READNOISE = 2.5 # From the specific camera used on medium-gain readout mode
 MAXATTEMPTS = 30
-MAXALIGNS = 5
-WAITTIME = 5
+MAXALIGNS = 10
+WAITTIME = 10
 
 ast = AstrometryNet()
 ast.api_key = "vxbrustekypatepi"
@@ -174,7 +177,7 @@ for folder in subfolders:
                     # Run a DAOStarFinder source finding algorithm with sigma-clipped median sky subtraction
                     print("Finding sources...")
                     imgmean, imgmedian, imgstd = sigma_clipped_stats(final_image, sigma=3.0)
-                    daofind = DAOStarFinder(fwhm=FWHM, threshold=5.*imgstd)
+                    daofind = DAOStarFinder(fwhm=FWHM, threshold=6.*imgstd)
                     sources = daofind(final_image - imgmedian)
                     ogsources = len(sources)
                     for source in enumerate(sources):
@@ -190,7 +193,7 @@ for folder in subfolders:
                     attempts = 0
                     while(attempts < MAXATTEMPTS):
                         try:
-                            wcs_header = ast.solve_from_source_list(sources["xcentroid"], sources["ycentroid"],WIDTH,HEIGHT,solve_timeout=90,center_ra=CENTER_RA,center_dec=CENTER_DEC,radius=0.5)
+                            wcs_header = ast.solve_from_source_list(sources["xcentroid"], sources["ycentroid"],WIDTH,HEIGHT,solve_timeout=120,center_ra=CENTER_RA,center_dec=CENTER_DEC,radius=0.5)
                         except Exception as e:
                             print(f"Failed. Reason: {e}")
                             attempts += 1
@@ -238,10 +241,10 @@ for folder in subfolders:
                             print("Cross-match returned " + str(len(result)) + " matches.")    
 
                     # Confirm matches and pair lists
-                    for row in enumerate(sourcelist):
-                        source = row[1]
+                    for source in sourcelist:
                         if abs(source["xcentroid"]-target_pos[0])+abs(source["ycentroid"]-target_pos[1]) < 3:
-                            source["ref_mag"] = 1000 # Mark target with a reference magnitude "tag" of 1000
+                            # Mark target with a reference magnitude "tag" of 1000
+                            source["ref_mag"] = 1000
                             failed = False
                         else:
                             for cross in result:
@@ -249,69 +252,99 @@ for folder in subfolders:
                                 if err < 0.001:
                                     source["ref_mag"] = cross["psfMag_"+filt[0]]
                                     source["ref_mag_err"] = cross["psfMagerr_"+filt[0]]
-                    sourcelist = sourcelist[sourcelist["ref_mag"] != 0] # Remove sources without a catalog cross-match
+                    # Remove sources too close to eachother / sources without a catalog cross-match
+                    sourcelist = sourcelist[sourcelist["ref_mag"] != 0] 
+                    keepers = list(range(len(sourcelist)))
+                    for first in enumerate(sourcelist):
+                        for second in enumerate(sourcelist):
+                            if (first != second) and (np.sqrt((first[1]["xcentroid"]-second[1]["xcentroid"])**2+(first[1]["ycentroid"]-second[1]["ycentroid"])**2) < FWHM * (R_OUT + R_IN)):
+                                if first[1]["ref_mag"] == 1000 or second[1]["ref_mag"] == 1000:
+                                    raise Exception("Target eliminated due to conflicting source...")
+                                if first[0] in keepers:
+                                    keepers.remove(first[0])
+                                if second[0] in keepers:
+                                    keepers.remove(second[0])
+                    sourcelist = sourcelist[keepers]
                     references = len(sourcelist) - 1 + int(failed)
                     print(str(references)+" matches confirmed.")
                     if failed: 
                         print("Failed to find target in source list. Using WCS-derived position instead.")
-                        sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000,0)) # Worst case scenario
+                        # Worst case scenario
+                        sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000,0))
                     else: 
                         print("Target found in source list.")
 
-                    # Aperture photometry: circular apertures; median sigma-clipped background from annulus
+                    # Aperture photometry: circular apertures; sigma-clipped median background from annulus
                     print("Performing aperture photometry...")
                     positions = [(source["xcentroid"],source["ycentroid"]) for source in sourcelist]
-                    aperture = CircularAperture(positions, r=FWHM*1.75)
-                    annulus = CircularAnnulus(positions, r_in=FWHM*2., r_out=FWHM*3.)
+                    aperture = CircularAperture(positions, r=FWHM*R_AP)
+                    annulus = CircularAnnulus(positions, r_in=FWHM*R_IN, r_out=FWHM*R_OUT)
                     sclip = SigmaClip(sigma=3.0, maxiters=5)
                     obj_stats = ApertureStats(final_image, aperture, sigma_clip=None)
                     bkg_stats = ApertureStats(final_image, aperture, sigma_clip=sclip)
-                    total_bkg = bkg_stats.median * obj_stats.sum_aper_area.value
+                    bkg_perpixel = bkg_stats.median
+                    total_bkg = bkg_perpixel * obj_stats.sum_aper_area.value
                     bkgsub = obj_stats.sum - total_bkg
+                    # Tag bad objects such that their instrumental magnitude is computed as exactly -40
+                    bkgsub[bkgsub<=0] = 10**16
                     inst_mag = -2.5 * np.log10(bkgsub)
                     # Estimate S/N ratio using the modified CCD equation.
-                    snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_stats.median+FRAMES*med_dark+FRAMES*READNOISE**2+FRAMES*(GAIN*ANALOGDIGITALERROR)**2))
-                    inst_mag_err = 2.5/(snr*np.log(10)) # Error in instrumental magnitude from S/N
-                    med_inst_mag_err = np.median(inst_mag_err)
+                    snr = bkgsub/np.sqrt(bkgsub+obj_stats.sum_aper_area.value*(1+obj_stats.sum_aper_area.value/bkg_stats.sum_aper_area.value)*(bkg_perpixel+FRAMES*med_dark+FRAMES*READNOISE**2+FRAMES*(GAIN*ANALOGDIGITALERROR)**2))
+                    # Find error in instrumental magnitude from S/N
+                    inst_mag_err = 2.5/(snr*np.log(10))
 
                     sourcelist.add_columns([inst_mag,inst_mag_err,snr],names=["inst_mag","inst_mag_err","snr"])
-                    reflist = sourcelist[sourcelist["ref_mag"] != 1000] # Don't use target as a reference
-                    if len(reflist) > 10: reflist = reflist[reflist["inst_mag_err"] < max(med_inst_mag_err,0.05)] # Eliminate sources with high error from being references, only if there are more than 10 references in the first place
+                    # Remove bad objects previously tagged
+                    sourcelist = sourcelist[sourcelist["inst_mag"] != -40]
+                    med_inst_mag_err = np.median(sourcelist["inst_mag_err"])
+                    # Don't use target as a reference
+                    reflist = sourcelist[sourcelist["ref_mag"] != 1000]
+                    # Eliminate sources with high error from being references (as long as there are more than 10 references to begin with)
+                    if len(reflist) > 10: reflist = reflist[reflist["inst_mag_err"] < max(med_inst_mag_err,0.05)]
                     if len(reflist) < 5:
                         print("Very few (n<5) reference stars found. Data quality likely poor.")
                         bad = True
-                    blist = [source["ref_mag"]-source["inst_mag"] for source in reflist] # List of zero-points estimated for each reference star
+                    # Estimated list of zero-points for each reference star
+                    blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
                     iters = 0
                     zero_point_std = 1
                     bad = False
-                    while(zero_point_std > 0.1 and iters <= 5): # Sigma-clipping to determine zero-point without outliers
+                    # Perform sigma-clipping to determine zero-point without outliers
+                    while(zero_point_std > 0.1 and iters <= min(5,len(reflist)-1)):
                         iters += 1
                         bstats = sigma_clipped_stats(blist,sigma=1,maxiters=iters,cenfunc="mean")
                         zero_point = bstats[1]
                         zero_point_std = bstats[2]
-                    if iters > 5: # If it takes more than 5 iterations, there wasn't convergence
+                    if iters > min(5,len(reflist)-1):
                         medzp = np.median(bstats)
                         if abs(newzp - zero_point) > zero_point_std:
                             print("Bad estimate without convergence. Data quality likely poor.")
                             bad = True
                         else:
                             zero_point = medzp
-                            zero_point_std = 1.5*np.std(bstats) # If the median seems like an okay estimate, use it; multiply std by 1.5 to account for SE on median vs mean
-                    bclip = sigma_clip(blist,sigma=1,maxiters=iters,cenfunc="mean") # Repeat the same sigma-clipping but now in order to determine WHICH points are outliers
+                             # If the median seems like an okay estimate, use it; multiply std by 1.5 to account for SE on median vs mean
+                            zero_point_std = 1.5*np.std(bstats)
+                    # Repeat the same sigma-clipping but now in order to determine WHICH points are outliers
+                    bclip = sigma_clip(blist,sigma=1,maxiters=iters,cenfunc="mean") 
                     reflist.add_column(bclip.mask,name="outlier")
                     inlist = reflist[reflist["outlier"]==False]
                     outlist = reflist[reflist["outlier"]==True]
                     nref = len(inlist)
-                    zero_point_err = zero_point_std / np.sqrt(nref) # Standard error on the mean estimated as sample standard deviation divided by square root of sample size
+                    # Standard error on the mean estimated as sample standard deviation divided by square root of sample size
+                    zero_point_err = zero_point_std / np.sqrt(nref) 
                     if zero_point_err > 0.2:
                         print("Unexpected zero point error. Data quality likely poor.")
                         bad = True
                     print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                     t_inst_mag, t_inst_mag_err, t_snr = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err","snr"][0]
                     t_mag = t_inst_mag + zero_point
-                    t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2) # Zero point error and instrumental magnitude error combine to make the net error on the target magnitude
+                    # Zero point error and instrumental magnitude error combine to make the net error on the target magnitude
+                    t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
                     print(f"Target S/N ratio: {t_snr}")
                     print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
+                    if np.isnan(t_mag) or t_snr < 0:
+                        print("Nonphysical values obtained. Data quality likely poor.")
+                        bad = True
 
                     # Plot data regarding zero-point calculation
                     plt.xlabel("Instrumental magnitude")
