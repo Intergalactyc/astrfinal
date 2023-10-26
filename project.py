@@ -31,16 +31,13 @@ warnings.simplefilter('ignore', category=np.exceptions.VisibleDeprecationWarning
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
 target_sky = SkyCoord("22h02m43.26s +42d16m39.65s") # BL Lac coordinates
-reference_sky = SkyCoord("22h02m45.38s +42d16m35.02s") # UCAC4 662-103491 coordinates
-reference_mags = {"g'":13.777,"r'":12.326,"i'":11.683}
-reference_errs = {"g'":0.02,"r'":0.06,"i'":0.07}
 
 CENTER_RA, CENTER_DEC = 330.23, 42.28 # RA and Dec for center of search, in degrees
-FWHM_LIST = [7.0,10.0,9.0]
+FWHM_LIST = [7.0,10.0,9.0] # Different nights have different FWHMs
 FOLDER_ID = 0
-R_AP = 1.8
-R_IN = 2.2
-R_OUT = 3.2
+R_AP = 1.75
+R_IN = 2.0
+R_OUT = 3.25
 WIDTH = 3216
 HEIGHT = 2208
 SRSIZE = 60
@@ -67,7 +64,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","T_MAG","T_MAG_ERR","R_MAG","R_MAG_ERR","FAIL","NREF","TGT_SNR","R_SNR","BAD","OUT"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","f8","f8","i4","i4","f4","f4","?","?"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","T_MAG","T_MAG_ERR","FAIL","NREF","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","?"))
 disappointments = []
 for folder in subfolders:
     FWHM = FWHM_LIST[FOLDER_ID]
@@ -219,15 +216,12 @@ for folder in subfolders:
                         
                         wcs = WCS(wcs_header)
                         target_pos = wcs.world_to_pixel(target_sky)
-                        reference_pos = wcs.world_to_pixel(reference_sky)
                         sourcepositions = [(source["xcentroid"],source["ycentroid"]) for source in sources]
                         sourcelist = sources["xcentroid","ycentroid"]
                         skycoords = np.transpose(wcs.pixel_to_world_values(sourcepositions))
                         sourcelist.add_columns([skycoords[0],skycoords[1],0.],names=["ra","dec","ref_mag"])
 
-                        failedT = True
-                        failedR = True
-                        sourceid = None
+                        failed = True
 
                         # Use Astroquery to check the SDSS catalog for source matches in order to estimate zero-point for photometric calibration. Again a try-catch is set up to retry in case of connection failure
                         print("Querying for SDSS catalog cross-matches...")
@@ -248,16 +242,11 @@ for folder in subfolders:
                                 print("Cross-match returned " + str(len(result)) + " matches.")    
 
                         # Confirm matches and pair lists
-                        print(f"Reference position: ({reference_pos[0]},{reference_pos[1]})")
                         for source in sourcelist:
                             if abs(source["xcentroid"]-target_pos[0])+abs(source["ycentroid"]-target_pos[1]) < 3:
                                 # Mark target with a reference magnitude "tag" of 1000
                                 source["ref_mag"] = 1000
-                                failedT = False
-                            elif abs(source["xcentroid"]-reference_pos[0])+abs(source["ycentroid"]-reference_pos[1]) < 3:
-                                # Mark primary reference with a reference magnitude "tag" of 2000
-                                source["ref_mag"] = 2000
-                                failedR = False
+                                failed = False
                             else:
                                 for cross in result:
                                     err = abs(cross["ra"]-source["ra"])+abs(cross["dec"]-source["dec"])
@@ -269,25 +258,20 @@ for folder in subfolders:
                         for first in enumerate(sourcelist):
                             for second in enumerate(sourcelist):
                                 if (first != second) and (np.sqrt((first[1]["xcentroid"]-second[1]["xcentroid"])**2+(first[1]["ycentroid"]-second[1]["ycentroid"])**2) < FWHM * (R_OUT + R_AP)):
-                                    if not(first[1]["ref_mag"] in [1000,2000] or second[1]["ref_mag"] in [1000,2000]):
+                                    if not(first[1]["ref_mag"] == 1000 or second[1]["ref_mag"] == 1000):
                                         if first[0] in keepers:
                                             keepers.remove(first[0])
                                         if second[0] in keepers:
                                             keepers.remove(second[0])
                         sourcelist = sourcelist[keepers]
-                        references = len(sourcelist) - 2 + int(failedT) + int(failedR)
+                        references = len(sourcelist) - 2 + int(failed)
                         print(str(references)+" matches confirmed.")
-                        if failedT: 
+                        if failed: 
                             print("Failed to find target in source list. Using WCS-derived position instead.")
                             sourcelist.add_row((target_pos[0],target_pos[1],0,0,1000))
                         else: 
                             print("Target found in source list.")
-                        if failedR:
-                            print("Failed to find primary reference in source list. Using WCS-derived position instead.")
-                            sourcelist.add_row((reference_pos[0],reference_pos[1],0,0,2000))
-                        else:
-                            print("Primary reference found in source list.")
-                        
+
                         # Aperture photometry: circular apertures; sigma-clipped median background from annulus
                         print("Performing aperture photometry...")
                         positions = [(source["xcentroid"],source["ycentroid"]) for source in sourcelist]
@@ -311,11 +295,9 @@ for folder in subfolders:
                         # Remove bad objects as previously tagged
                         sourcelist = sourcelist[sourcelist["inst_mag"] != -40]
                         med_inst_mag_err = np.median(sourcelist["inst_mag_err"])
-                        # Don't use target or primary reference as a zp reference; only use references within 2 magnitudes of target
+                        # Don't use target as a zp reference; only use references within 2 magnitudes of target
                         t_inst_mag, t_inst_mag_err, t_snr = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err","snr"][0]
-                        r_inst_mag, r_inst_mag_err, r_snr = sourcelist[sourcelist["ref_mag"]==2000]["inst_mag","inst_mag_err","snr"][0]
                         reflist = sourcelist[sourcelist["ref_mag"] != 1000]
-                        reflist = reflist[reflist["ref_mag"] != 2000]
                         reflist = reflist[abs(reflist["inst_mag"]-t_inst_mag)<2]
                         if len(reflist) < 5:
                             print("Very few (n<5) reference stars found. Data quality likely poor.")
@@ -341,24 +323,17 @@ for folder in subfolders:
                             bad = True
                         print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                         t_mag = t_inst_mag + zero_point
-                        r_mag = r_inst_mag + zero_point
-                        r_diff = abs(r_mag - reference_mags[filt])
 
                         # Zero point error and instrumental magnitude error combine to make the net error on the target magnitude
                         t_mag_err = np.sqrt(zero_point_err**2 + t_inst_mag_err**2)
-                        r_mag_err = np.sqrt(zero_point_err**2 + r_inst_mag_err**2)
-                        r_out = r_diff > r_mag_err + reference_errs[filt]
-                        print(f"Target, Reference S/N ratios: {t_snr}, {r_snr}")
+                        print(f"Target S/N ratio: {t_snr}")
                         print(f"Target magnitude computed as {t_mag} with error {t_mag_err}.")
-                        print(f"Reference magnitude computed as {r_mag} with error {r_mag_err}, referenced to {reference_mags[filt]}.")
-                        if r_out: print("Reference magnitude out of expected bounds.")
                         if np.isnan(t_mag) or t_snr < 0:
                             print("Nonphysical values obtained. Data quality likely poor.")
                             bad = True
 
                         # Plot data regarding zero-point calculation
                         plt.xlabel("Instrumental magnitude")
-                        plt.ylabel("Reference magnitude")
                         plt.title(f"Night of {folder}, {run}.{subrun} in filter {filt}")
                         plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err)) + f" with {iters} iterations")
                         xlist_zp = [np.min(inlist["inst_mag"])-0.1,np.max(inlist["inst_mag"])+0.1]
@@ -367,13 +342,12 @@ for folder in subfolders:
                         plt.scatter(inlist["inst_mag"],inlist["ref_mag"],marker="o",c="dodgerblue",label="Reference stars")
                         plt.scatter(outlist["inst_mag"],outlist["ref_mag"],marker="x",c="orangered",label="Rejected outliers")
                         plt.scatter([t_inst_mag],[t_mag],marker="D",c="mediumorchid",label="Target")
-                        plt.scatter([r_inst_mag],[reference_mags[filt]],marker="D",c="seagreen",label="Primary Reference")
                         plt.legend()
                         plt.savefig(pipeout+f"\\plots\\{filt}_{run}-{subrun}_zeropoint.png",bbox_inches="tight")
                         plt.cla()
 
                         # Append data to output table
-                        outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,r_mag,r_mag_err,failed_aligns,nref,t_snr,r_snr,bad,r_out))
+                        outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,t_snr,bad))
                     except Exception as e:
                         print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
                 plt.close(fig_zp)
