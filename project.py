@@ -334,7 +334,7 @@ for folder in subfolders:
                         # Plot data regarding zero-point calculation
                         plt.xlabel("Instrumental magnitude")
                         plt.title(f"Night of {folder}, {run}.{subrun} in filter {filt}")
-                        plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err))")
+                        plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err)))
                         xlist_zp = [np.min(inlist["inst_mag"])-0.1,np.max(inlist["inst_mag"])+0.1]
                         ylist_zp = [np.min(inlist["inst_mag"])-0.1+zero_point,np.max(inlist["inst_mag"])+0.1+zero_point]
                         plt.plot(xlist_zp,ylist_zp,c="royalblue",label="Fit line")
