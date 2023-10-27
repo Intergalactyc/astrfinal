@@ -64,7 +64,7 @@ for so in subout:
     path = os.path.join(directory,so)
     os.makedirs(path,exist_ok=True)
 
-outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","T_MAG","T_MAG_ERR","FAIL","NREF","TGT_SNR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","?"))
+outtable = Table(names = ("JD","DATE","FILT","RUN","ZP","ZP_ERR","T_MAG","T_MAG_ERR","FAIL","NREF","TGT_SNR","T_INST_MAG_ERR","BAD"),dtype=("f8","U16","U8","U8","f8","f8","f8","f8","i4","i4","f4","f4","?"))
 disappointments = []
 for folder in subfolders:
     FWHM = FWHM_LIST[FOLDER_ID]
@@ -306,18 +306,17 @@ for folder in subfolders:
                         blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
                         bad = False
                         # Perform sigma-clipping to determine zero-point without outliers
-                        iters = 1
-                        bstats = sigma_clipped_stats(blist,sigma=1,maxiters=1,cenfunc="median")
+                        bstats = sigma_clipped_stats(blist,sigma=2,maxiters=2,cenfunc="median")
                         zero_point = bstats[1]
                         zero_point_std = bstats[2]
                         # Repeat the same sigma-clipping but now in order to determine WHICH points are outliers
-                        bclip = sigma_clip(blist,sigma=1,maxiters=1,cenfunc="median") 
+                        bclip = sigma_clip(blist,sigma=2,maxiters=2,cenfunc="median") 
                         reflist.add_column(bclip.mask,name="outlier")
                         inlist = reflist[reflist["outlier"]==False]
                         outlist = reflist[reflist["outlier"]==True]
                         nref = len(inlist)
                         # Standard error on the mean estimated as sample standard deviation divided by square root of sample size
-                        zero_point_err = 1.3*zero_point_std / np.sqrt(nref) 
+                        zero_point_err = 1.253*zero_point_std / np.sqrt(nref) 
                         if zero_point_err > 0.2:
                             print("Unexpected zero point error. Data quality likely poor.")
                             bad = True
@@ -335,7 +334,7 @@ for folder in subfolders:
                         # Plot data regarding zero-point calculation
                         plt.xlabel("Instrumental magnitude")
                         plt.title(f"Night of {folder}, {run}.{subrun} in filter {filt}")
-                        plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err)) + f" with {iters} iterations")
+                        plt.suptitle("Zero point " + str("{:.4f}".format(zero_point)) + r"$\pm$" + str("{:.4f}".format(zero_point_err))")
                         xlist_zp = [np.min(inlist["inst_mag"])-0.1,np.max(inlist["inst_mag"])+0.1]
                         ylist_zp = [np.min(inlist["inst_mag"])-0.1+zero_point,np.max(inlist["inst_mag"])+0.1+zero_point]
                         plt.plot(xlist_zp,ylist_zp,c="royalblue",label="Fit line")
@@ -347,7 +346,7 @@ for folder in subfolders:
                         plt.cla()
 
                         # Append data to output table
-                        outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,t_snr,bad))
+                        outtable.add_row((JD_OBS,DATE_OBS,filt,run+"."+str(subrun),zero_point,zero_point_err,t_mag,t_mag_err,failed_aligns,nref,t_snr,t_inst_mag_err,bad))
                     except Exception as e:
                         print(f"Failure in {run}.{subrun} for filter {filt} in {base_path}. Reason: {e}")
                 plt.close(fig_zp)
