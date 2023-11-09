@@ -40,7 +40,7 @@ R_IN = 2.0
 R_OUT = 3.25
 WIDTH = 3216
 HEIGHT = 2208
-SRSIZE = 60
+SRSIZE = 5
 GAIN = 2.45 # Gain of specific camera used on medium-gain readout mode
 ANALOGDIGITALERROR = np.sqrt(1/12) # Error in analog-digital conversion
 READNOISE = 2.5 # From the specific camera used on medium-gain readout mode
@@ -134,6 +134,14 @@ for folder in subfolders:
                 # Iterate over subruns of size defined by SRSIZE
                 for subrun in range(subruns):
                     try:
+
+                        
+
+
+
+
+
+
                         print(f"Calibrating, aligning, and stacking frames in {run}.{subrun} for filter {filt} in {base_path}")
                         target_fits = fits.open(science[filt][run][subrun*SRSIZE])
                         target_ccd = target_fits[0].data
@@ -173,6 +181,8 @@ for folder in subfolders:
                         topcrop = ceil(0.5 * (max(translations[1])+abs(max(translations[1]))))+FWHM
                         botcrop = ceil(0.5 * (min(translations[1])-abs(min(translations[1]))))+FWHM
 
+                        # Is there a better way to do the above? Having to find_transform and then apply_transform seems to take significantly longer than just registering
+
                         # Stack aligned frames
                         final_image = np.sum(alg_stack, axis=0).astype("float32")
                         FRAMES = len(alg_stack)
@@ -210,7 +220,7 @@ for folder in subfolders:
                                     print("Astrometric solution found!")
                                 else:
                                     print("Ultimately failed to find astrometric solution, but did not throw error.")
-
+                        
                         # Write out astrometrically solved stacked image
                         fits.PrimaryHDU(final_image,wcs_header).writeto(pipeout+f"\\images\\final_{filt}_{run}-{subrun}.fit",overwrite=True)
                         
@@ -239,7 +249,9 @@ for folder in subfolders:
                                     time.sleep(WAITTIME)
                             else:
                                 attempts = MAXATTEMPTS
-                                print("Cross-match returned " + str(len(result)) + " matches.")    
+                                print("Cross-match returned " + str(len(result)) + " matches.")
+
+                        # Instead of this I could possibly run a cone search once, and then here just perform a list pairing instead of querying every single time. Possibly even use the same reference stars (within bounds) each time - independent of source list????
 
                         # Confirm matches and pair lists
                         for source in sourcelist:
@@ -306,7 +318,7 @@ for folder in subfolders:
                         blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
                         bad = False
                         # Perform sigma-clipping to determine zero-point without outliers
-                        bstats = sigma_clipped_stats(blist,sigma=2,maxiters=2,cenfunc="median")
+                        bstats = sigma_clipped_stats(blist,sigma=1,maxiters=2,cenfunc="median") # Want a better way of detecting outliers. Cluster analysis?
                         zero_point = bstats[1]
                         zero_point_std = bstats[2]
                         # Repeat the same sigma-clipping but now in order to determine WHICH points are outliers
