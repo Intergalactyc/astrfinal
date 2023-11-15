@@ -366,6 +366,7 @@ for folder in subfolders:
         print(f"Failure in {folder}. Reason: {e}")
     FOLDER_ID += 1
 
+# Finish and write files
 print("Analysis completed! Writing files.")
 outtable.write(directory+"\\outdata\\data.csv",format="csv",overwrite=True)
 with open(directory+"\\outdata\\failures.txt","w") as f: f.write("\n".join(disappointments))
