@@ -40,7 +40,7 @@ R_IN = 2.0
 R_OUT = 3.25
 WIDTH = 3216
 HEIGHT = 2208
-SRSIZE = 5
+SRSIZE = 20
 GAIN = 2.45 # Gain of specific camera used on medium-gain readout mode
 ANALOGDIGITALERROR = np.sqrt(1/12) # Error in analog-digital conversion
 READNOISE = 2.5 # From the specific camera used on medium-gain readout mode
@@ -134,14 +134,6 @@ for folder in subfolders:
                 # Iterate over subruns of size defined by SRSIZE
                 for subrun in range(subruns):
                     try:
-
-                        
-
-
-
-
-
-
                         print(f"Calibrating, aligning, and stacking frames in {run}.{subrun} for filter {filt} in {base_path}")
                         target_fits = fits.open(science[filt][run][subrun*SRSIZE])
                         target_ccd = target_fits[0].data
@@ -251,8 +243,6 @@ for folder in subfolders:
                                 attempts = MAXATTEMPTS
                                 print("Cross-match returned " + str(len(result)) + " matches.")
 
-                        # Instead of this I could possibly run a cone search once, and then here just perform a list pairing instead of querying every single time. Possibly even use the same reference stars (within bounds) each time - independent of source list????
-
                         # Confirm matches and pair lists
                         for source in sourcelist:
                             if abs(source["xcentroid"]-target_pos[0])+abs(source["ycentroid"]-target_pos[1]) < 3:
@@ -311,27 +301,23 @@ for folder in subfolders:
                         t_inst_mag, t_inst_mag_err, t_snr = sourcelist[sourcelist["ref_mag"]==1000]["inst_mag","inst_mag_err","snr"][0]
                         reflist = sourcelist[sourcelist["ref_mag"] != 1000]
                         reflist = reflist[abs(reflist["inst_mag"]-t_inst_mag)<2]
-                        if len(reflist) < 5:
-                            print("Very few (n<5) reference stars found. Data quality likely poor.")
+                        nref = len(reflist)
+                        if nref <= 3:
+                            print("Very few (n<=3) reference stars found. Data quality likely poor.")
                             bad = True
                         # Estimated list of zero-points for each reference star
                         blist = [source["ref_mag"]-source["inst_mag"] for source in reflist]
                         bad = False
                         # Perform sigma-clipping to determine zero-point without outliers
-                        bstats = sigma_clipped_stats(blist,sigma=1,maxiters=2,cenfunc="median") # Want a better way of detecting outliers. Cluster analysis?
+                        bstats = sigma_clipped_stats(blist,sigma=1,maxiters=1,cenfunc="median") # Want a better way of detecting outliers. Cluster analysis?
                         zero_point = bstats[1]
                         zero_point_std = bstats[2]
                         # Repeat the same sigma-clipping but now in order to determine WHICH points are outliers
-                        bclip = sigma_clip(blist,sigma=2,maxiters=2,cenfunc="median") 
+                        bclip = sigma_clip(blist,sigma=1,maxiters=1,cenfunc="median") 
                         reflist.add_column(bclip.mask,name="outlier")
                         inlist = reflist[reflist["outlier"]==False]
                         outlist = reflist[reflist["outlier"]==True]
-                        nref = len(inlist)
-                        # Standard error on the mean estimated as sample standard deviation divided by square root of sample size
-                        zero_point_err = 1.253*zero_point_std / np.sqrt(nref) 
-                        if zero_point_err > 0.2:
-                            print("Unexpected zero point error. Data quality likely poor.")
-                            bad = True
+                        zero_point_err = zero_point_std
                         print(f"Zero point computed as {zero_point} with error {zero_point_err}.")
                         t_mag = t_inst_mag + zero_point
 
